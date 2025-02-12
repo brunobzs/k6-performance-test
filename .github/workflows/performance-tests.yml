@@ -1,0 +1,97 @@
+name: Performance Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * *'  # Executa diariamente à meia-noite
+  workflow_dispatch:      # Permite execução manual
+
+env:
+  K6_VERSION: 0.47.0
+
+jobs:
+  performance-test:
+    name: Run K6 Performance Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Create results directory
+        run: mkdir -p results
+
+      - name: Run K6 tests
+        run: |
+          k6 run scripts/httpbin-test.js --out json=results/performance-test-report.json
+
+      - name: Generate HTML report
+        run: |
+          npm install handlebars
+          node scripts/generate-report.js results/performance-test-report.json results/performance-test-report.html
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-test-results
+          path: results/
+          retention-days: 30
+
+      - name: Check performance thresholds
+        run: |
+          if grep -q '"fails":0' results/performance-test-report.json; then
+            echo "All performance tests passed!"
+            exit 0
+          else
+            echo "Performance tests failed!"
+            exit 1
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Performance Test Failed',
+              body: `Performance test failed in workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
+            console.log('Created issue #' + issue.data.number);
+
+  deploy-report:
+    needs: performance-test
+    if: success() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-test-results
+          path: results
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./results
+          keep_files: true
